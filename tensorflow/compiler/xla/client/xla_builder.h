@@ -30,17 +30,18 @@ limitations under the License.
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/functional/function_ref.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "tensorflow/compiler/xla/client/padding.h"
 #include "tensorflow/compiler/xla/client/xla_computation.h"
 #include "tensorflow/compiler/xla/comparison_util.h"
+#include "tensorflow/compiler/xla/hlo/ir/dynamic_parameter_binding.h"
+#include "tensorflow/compiler/xla/hlo/ir/hlo_input_output_alias_config.h"
+#include "tensorflow/compiler/xla/hlo/ir/hlo_opcode.h"
 #include "tensorflow/compiler/xla/literal.h"
 #include "tensorflow/compiler/xla/literal_util.h"
-#include "tensorflow/compiler/xla/service/dynamic_parameter_binding.h"
 #include "tensorflow/compiler/xla/service/hlo.pb.h"
-#include "tensorflow/compiler/xla/service/hlo_input_output_alias_config.h"
-#include "tensorflow/compiler/xla/service/hlo_opcode.h"
 #include "tensorflow/compiler/xla/shape_util.h"
 #include "tensorflow/compiler/xla/status_macros.h"
 #include "tensorflow/compiler/xla/statusor.h"
@@ -404,7 +405,7 @@ class XlaBuilder {
 
   // A helper function that runs a function that returns a StatusOr<XlaOp> and
   // returns an XlaOp.
-  XlaOp ReportErrorOrReturn(const std::function<StatusOr<XlaOp>()>& op_creator);
+  XlaOp ReportErrorOrReturn(absl::FunctionRef<StatusOr<XlaOp>()> op_creator);
 
   // Returns true if 'operand' is a compile-time constant. A compile-time
   // constant does not depend on any parameters, or on stateful operators such
@@ -1570,6 +1571,21 @@ class XlaBuilder {
   Status CheckOpBuilder(XlaOp op) const;
 
  private:
+  XlaOp AllGatherImpl(XlaOp operand, int64_t all_gather_dimension,
+                      int64_t shard_count,
+                      absl::Span<const ReplicaGroup> replica_groups,
+                      const std::optional<ChannelHandle>& channel_id,
+                      const std::optional<Layout>& layout,
+                      const std::optional<bool> use_global_device_ids,
+                      bool async);
+
+  XlaOp AllReduceImpl(XlaOp operand, const XlaComputation& computation,
+                      absl::Span<const ReplicaGroup> replica_groups,
+                      const std::optional<ChannelHandle>& channel_id,
+                      const std::optional<Shape>& layout,
+                      const std::optional<bool> use_global_device_ids,
+                      bool async);
+
   XlaOp ConditionalImpl(
       XlaOp branch_index,
       absl::Span<const XlaComputation* const> branch_computations,
@@ -2199,7 +2215,7 @@ XlaOp CustomCallWithComputation(
     absl::Span<const std::pair<ShapeIndex, std::pair<int64_t, ShapeIndex>>>
         output_operand_aliasing = {},
     const Literal* literal = nullptr,
-    CustomCallSchedule = CustomCallSchedule::SCHEDULE_NONE,
+    CustomCallSchedule schedule = CustomCallSchedule::SCHEDULE_NONE,
     CustomCallApiVersion api_version = API_VERSION_ORIGINAL);
 
 // Overload which constructs a custom call with fixed layouts. The operands will

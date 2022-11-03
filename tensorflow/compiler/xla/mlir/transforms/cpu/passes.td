@@ -22,17 +22,6 @@ include "mlir/Pass/PassBase.td"
 // Auxiliary passes for lowering to XLA Cpu runtime.
 //===----------------------------------------------------------------------===//
 
-def TransformScatterForCpuPass :
-    Pass<"xla-cpu-transform-scatter", "mlir::func::FuncOp"> {
-  let summary = "Transform scatter ops for running on CPU";
-
-  let description = [{
-    Transform scatter ops with the preferred parameters for the CPU backend.
-  }];
-
-  let constructor = "createTransformScatterForCpuPass()";
-}
-
 def ConvertLmhloToCpuRuntimePass :
     Pass<"xla-lmhlo-to-cpu-runtime", "mlir::ModuleOp"> {
   let summary = "Converts lmhlo operations to XLA Cpu runtime custom calls";
@@ -42,6 +31,24 @@ def ConvertLmhloToCpuRuntimePass :
   }];
 
   let constructor = "createConvertLmhloToCpuRuntimePass()";
+}
+
+def LegalizeXlaAbiPass :
+    Pass<"xla-legalize-abi", "mlir::ModuleOp"> {
+  let summary = "Convers layouts and data formats at ABI boundaries";
+
+  let description = [{
+      Converts layouts defined in entry_computation_layout to the default
+      layout assumed by the MLIR pipeline. The same is done for custom calls.
+
+      This pass should run immediately after expand-hlo-tuples.
+  }];
+
+  let dependentDialects = [
+      "mlir::func::FuncDialect", "mlir::mhlo::MhloDialect"
+  ];
+
+  let constructor = "createXlaAbiLegalizationPass()";
 }
 
 #endif  // TENSORFLOW_COMPILER_XLA_MLIR_TRANSFORMS_CPU_PASSES_TD_

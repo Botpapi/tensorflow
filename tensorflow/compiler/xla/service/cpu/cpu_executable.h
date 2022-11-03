@@ -19,6 +19,7 @@ limitations under the License.
 #include <cstddef>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -85,7 +86,7 @@ class XlaRuntimeCpuExecutable {
     }
   }
 
-  StatusOr<std::string> GetObjFile() const {
+  StatusOr<std::string_view> GetObjFile() const {
     if (!std::holds_alternative<std::unique_ptr<runtime::JitExecutable>>(
             executable_)) {
       return InternalError("No JitExecutable");
@@ -98,12 +99,10 @@ class XlaRuntimeCpuExecutable {
     if (!obj_file)
       return InternalError("XlaRuntimeCpuExecutable didn't save the obj file");
 
-    std::string data(obj_file->getBuffer().data(),
-                     obj_file->getBuffer().size());
-    return data;
+    return std::string_view(obj_file->getBuffer());
   }
 
-  StatusOr<std::string> GetMlirModule() const {
+  StatusOr<std::string_view> GetMlirModule() const {
     if (!std::holds_alternative<std::unique_ptr<runtime::JitExecutable>>(
             executable_)) {
       return InternalError("No JitExecutable");
@@ -172,9 +171,8 @@ class CpuExecutable : public Executable {
       std::unique_ptr<HloModule> hlo_module, absl::string_view obj_file,
       absl::string_view mlir_module,
       std::unique_ptr<BufferAssignment> buffer_assignment,
-      XlaFrameworkMapping xla_framework_mapping) {
-    return Unimplemented("LoadFromObjFile unimplemented");
-  }
+      XlaFrameworkMapping xla_framework_mapping,
+      runtime::JitExecutable::Options opts);
 
   // This should be called after set_ir_module_string.
   const std::string& ir_module_string() const { return ir_module_string_; }
@@ -199,12 +197,12 @@ class CpuExecutable : public Executable {
 
   int64_t SizeOfGeneratedCodeInBytes() const override;
 
-  StatusOr<std::string> GetObjFile() const {
+  StatusOr<std::string_view> GetObjFile() const {
     if (!IsXlaRuntime()) return InternalError("Not an XLA Runtime executable");
     return xla_runtime_executable_->GetObjFile();
   }
 
-  StatusOr<std::string> GetMlirModule() const {
+  StatusOr<std::string_view> GetMlirModule() const {
     if (!IsXlaRuntime()) return InternalError("Not an XLA Runtime executable");
     return xla_runtime_executable_->GetMlirModule();
   }

@@ -115,18 +115,6 @@ cuda_py_test(
 )
 
 tf_py_test(
-    name = "counter_test",
-    size = "small",
-    srcs = ["counter_test.py"],
-    deps = [
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:dtypes",
-        "//tensorflow/python/data/experimental/ops:counter",
-        "//tensorflow/python/data/kernel_tests:test_base",
-    ],
-)
-
-tf_py_test(
     name = "csv_dataset_test",
     size = "medium",
     srcs = ["csv_dataset_test.py"],
@@ -144,22 +132,6 @@ tf_py_test(
         "//tensorflow/python/data/kernel_tests:test_base",
         "//tensorflow/python/data/ops:readers",
         "//tensorflow/python/eager:context",
-    ],
-)
-
-tf_py_test(
-    name = "dense_to_ragged_batch_test",
-    size = "small",
-    srcs = ["dense_to_ragged_batch_test.py"],
-    shard_count = 4,
-    deps = [
-        "//tensorflow/python:array_ops",
-        "//tensorflow/python:client_testlib",
-        "//tensorflow/python:dtypes",
-        "//tensorflow/python:errors",
-        "//tensorflow/python/data/kernel_tests:test_base",
-        "//tensorflow/python/data/ops:dataset_ops",
-        "//third_party/py/numpy",
     ],
 )
 

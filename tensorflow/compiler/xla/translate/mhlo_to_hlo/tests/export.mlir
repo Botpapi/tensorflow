@@ -694,15 +694,15 @@ func.func @main(%arg0: tensor<2xi32>) -> tensor<2xf32> {
 // -----
 
 // CHECK:  HloModule
-func.func @main(%arg0: tensor<5x5xf32>, %arg1: tensor<5x5xi32>) -> tensor<5x5xi8> {
-  %result = "mhlo.stochastic_convert"(%arg0, %arg1) : (tensor<5x5xf32>, tensor<5x5xi32>) -> tensor<5x5xi8>
+func.func @main(%arg0: tensor<5x5xf32>, %arg1: tensor<5x5xui32>) -> tensor<5x5xi8> {
+  %result = "mhlo.stochastic_convert"(%arg0, %arg1) : (tensor<5x5xf32>, tensor<5x5xui32>) -> tensor<5x5xi8>
   func.return %result : tensor<5x5xi8>
 }
 
 // CHECK:  ENTRY
 // CHECK:  %[[ARG0:.*]] = f32[5,5] parameter(0)
-// CHECK:  %[[ARG1:.*]] = s32[5,5] parameter(1)
-// CHECK:  ROOT %[[RESULT:.*]] = s8[5,5] stochastic-convert(f32[5,5] %[[ARG0]], s32[5,5] %[[ARG1]])
+// CHECK:  %[[ARG1:.*]] = u32[5,5] parameter(1)
+// CHECK:  ROOT %[[RESULT:.*]] = s8[5,5] stochastic-convert(f32[5,5] %[[ARG0]], u32[5,5] %[[ARG1]])
 
 // -----
 
@@ -857,6 +857,20 @@ func.func @main(%arg: tensor<4x2xf32>, %size: tensor<i32>) -> tensor<i32> {
 // CHECK:  [[DYNAMIC:%.*]] = f32[4,<=2] set-dimension-size(f32[4,2] [[ARG]], s32[] [[SIZE]]), dimensions={1}
 // CHECK:  ROOT %[[RESULT:.*]] = s32[] get-dimension-size(f32[4,<=2] [[DYNAMIC]]), dimensions={1}
 
+
+// -----
+
+// CHECK:  HloModule
+func.func @main(%arg: tensor<?x4xf32, #mhlo.type_extensions<bounds = [8, -1]>>) -> tensor<8x4xf32> {
+  %size = mhlo.constant dense<8> : tensor<i32>
+  %1 = "mhlo.set_dimension_size"(%arg, %size) {dimension = 0 : i64} : (tensor<?x4xf32, #mhlo.type_extensions<bounds = [8, -1]>>, tensor<i32>) -> tensor<8x4xf32>
+  func.return %1 : tensor<8x4xf32>
+}
+
+// CHECK:  ENTRY
+// CHECK:  [[ARG:%.*]] = f32[<=8,4] parameter(0)
+// CHECK:  [[SIZE:%.*]] = s32[] constant(8)
+// CHECK:  ROOT [[DYNAMIC:%.*]] = f32[8,4] set-dimension-size(f32[<=8,4] [[ARG]], s32[] [[SIZE]]), dimensions={0}
 
 // -----
 

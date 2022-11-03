@@ -50,16 +50,6 @@ add_mlir_library(GmlStTilingInterfaceImpl
   THLODialect
 )
 
-add_mlir_library(GmlStComposeSetInterface
-  compose_set_interface.cc
-
-  LINK_LIBS PUBLIC
-  MLIRIR
-
-  DEPENDS
-  MLIRGmlStComposeSetInterfaceIncGen
-)
-
 add_mlir_library(GmlStBufferizableOpInterface
   bufferizable_op_interface_impl.cc
 
@@ -73,16 +63,19 @@ add_mlir_library(GmlStBufferizableOpInterface
 )
 
 add_mlir_library(GmlStPasses
-  bufferize_tiled_loop.cc
-  compose_set_ops.cc
+  collapse_materialize_ops.cc
   fusion.cc
   gml_st_to_scf.cc
   gml_st_to_gpu.cc
+  linalg_utils.cc
   tiling.cc
   tiling_cwise.cc
-  tiling_reduction.cc
+  tiling_gpu_warp.cc
   tiling_softmax.cc
-  collapse_materialize_ops.cc
+  transform_map_for_cpu.cc
+  transform_matmul_for_cpu.cc
+  transform_transpose_for_cpu.cc
+  transform_scatter_for_cpu.cc
   vectorization.cc
 
   DEPENDS
@@ -92,7 +85,6 @@ add_mlir_library(GmlStPasses
   Core
 
   LINK_LIBS PUBLIC
-  GmlStComposeSetInterface
   GmlStTilingInterface
   GmlStTilingInterfaceImpl
   MLIRDestinationStyleOpInterface

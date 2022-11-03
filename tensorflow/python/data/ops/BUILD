@@ -27,6 +27,11 @@ py_library(
 )
 
 py_library(
+    name = "padded_batch_op",
+    srcs = ["padded_batch_op.py"],
+)
+
+py_library(
     name = "rebatch_op",
     srcs = ["rebatch_op.py"],
     deps = [
@@ -53,9 +58,13 @@ py_library(
         ":iterator_ops",
         ":load_ops",
         ":options",
+        ":padded_batch_op",
+        ":ragged_batch_op",
         ":rebatch_op",
         ":save_ops",
+        ":sparse_batch_op",
         ":structured_function",
+        ":zip_op",
         "//tensorflow/python:constant_op",
         "//tensorflow/python:control_flow_ops",
         "//tensorflow/python:dataset_ops_gen",
@@ -138,6 +147,31 @@ py_library(
 )
 
 py_library(
+    name = "ragged_batch_op",
+    srcs = ["ragged_batch_op.py"],
+    srcs_version = "PY3",
+    deps = [
+        "//tensorflow/python:dtypes",
+        "//tensorflow/python:experimental_dataset_ops_gen",
+        "//tensorflow/python:framework_ops",
+        "//tensorflow/python:tensor_shape",
+        "//tensorflow/python:tensor_util",
+        "//tensorflow/python:util",
+        "//tensorflow/python/data/util:convert",
+        "//tensorflow/python/data/util:nest",
+        "//tensorflow/python/data/util:structure",
+    ],
+)
+
+py_library(
+    name = "sparse_batch_op",
+    srcs = ["sparse_batch_op.py"],
+    srcs_version = "PY3",
+    deps = [
+    ],
+)
+
+py_library(
     name = "save_ops",
     srcs = ["save_op.py"],
     deps = [
@@ -149,6 +183,11 @@ py_library(
         "//tensorflow/python/platform",
         "//tensorflow/python/util",
     ],
+)
+
+py_library(
+    name = "zip_op",
+    srcs = ["zip_op.py"],
 )
 
 py_library(

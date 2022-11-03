@@ -1,7 +1,5 @@
 load("//tensorflow/tsl/platform:build_config.bzl", "tf_proto_library")
 load("//tensorflow/compiler/xla:xla.bzl", "xla_py_proto_library")
-load("//tensorflow/tsl/platform:rules_cc.bzl", "cc_library")
-load("//tensorflow:tensorflow.bzl", "tf_cc_binary")
 
 package(
     default_visibility = ["//tensorflow:internal"],
@@ -48,25 +46,27 @@ py_library(
     deps = [":runner_proto_py"],
 )
 
-py_test(
-    name = "testlib_runner_test",
-    size = "small",
-    srcs = ["testlib_runner_test.py"],
-    data = [":testlib_runner"],
-    python_version = "PY3",
-    srcs_version = "PY3",
-    deps = [
-        ":runner",
-        "@absl_py//absl/testing:absltest",
-    ],
-)
-
-tf_cc_binary(
-    name = "testlib_runner",
-    testonly = True,
-    srcs = ["testlib_runner.cc"],
-    deps = [
-        ":runner_lib",
-        "//tensorflow/compiler/xla/mlir/transforms/runtime/tests:testlib_pipeline",
-    ],
-)
+# copybara:uncomment_begin(b/254857628)
+# py_test(
+#     name = "testlib_runner_test",
+#     size = "small",
+#     srcs = ["testlib_runner_test.py"],
+#     data = [":testlib_runner"],
+#     python_version = "PY3",
+#     srcs_version = "PY3",
+#     deps = [
+#         ":runner",
+#         "@absl_py//absl/testing:absltest",
+#     ],
+# )
+#
+# cc_binary(
+#     name = "testlib_runner",
+#     testonly = True,
+#     srcs = ["testlib_runner.cc"],
+#     deps = [
+#         ":runner_lib",
+#         "//tensorflow/compiler/xla/mlir/runtime/transforms/tests:testlib_pipeline",
+#     ],
+# )
+# copybara:uncomment_end

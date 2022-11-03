@@ -15,17 +15,19 @@ limitations under the License.
 
 #include <array>
 #include <cstdint>
+#include <initializer_list>
 #include <iterator>
 #include <memory>
+#include <string>
 #include <utility>
 
+#include "llvm/ADT/STLExtras.h"
 #include "mlir-hlo/Dialect/gml_st/IR/gml_st_ops.h"
 #include "mlir-hlo/Dialect/gml_st/transforms/passes.h"
+#include "mlir-hlo/Dialect/gml_st/transforms/vector_utils.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
-#include "mlir/Dialect/Linalg/IR/Linalg.h"
-#include "mlir/Dialect/Linalg/Utils/Utils.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
@@ -43,10 +45,16 @@ using namespace mlir;
 using namespace mlir::gml_st;
 using mlir::gpu::LaunchOp;
 using mlir::memref::SubViewOp;
+using mlir::vector::CombiningKind;
+using mlir::vector::ExtractOp;
+using mlir::vector::MultiDimReductionOp;
 using mlir::vector::TransferReadOp;
 using mlir::vector::TransferWriteOp;
 
 namespace {
+
+constexpr const char kDistributionLabelKey[] = "gml-st-distribution-label";
+
 /// Converts a sequence of 3 nested gml_st.parallel ops into a gpu.launch op.
 /// Throughout thes pass we will call the first level of nesting "block", the
 /// second "warp", and the 3rd "thread" level. The intention is to allude to the
@@ -73,23 +81,31 @@ namespace {
 struct ParallelOpToGpuPattern : public OpRewritePattern<ParallelOp> {
   using OpRewritePattern<ParallelOp>::OpRewritePattern;
 
+  ParallelOpToGpuPattern(MLIRContext* context, StringRef blockDistributionLabel)
+      : OpRewritePattern<ParallelOp>(context),
+        blockDistributionLabel(blockDistributionLabel) {}
+
   LogicalResult matchAndRewrite(ParallelOp root,
                                 PatternRewriter& rewriter) const override;
-};
 
-struct GenericOpToWarpReductionPattern : OpRewritePattern<linalg::GenericOp> {
-  using OpRewritePattern<linalg::GenericOp>::OpRewritePattern;
-
-  LogicalResult matchAndRewrite(linalg::GenericOp genericOp,
-                                PatternRewriter& rewriter) const override;
+ private:
+  std::string blockDistributionLabel;
 };
 
 struct MultiDimReductionOpToWarpReductionPattern
-    : OpRewritePattern<vector::MultiDimReductionOp> {
-  using OpRewritePattern<vector::MultiDimReductionOp>::OpRewritePattern;
+    : OpRewritePattern<MultiDimReductionOp> {
+  using OpRewritePattern<MultiDimReductionOp>::OpRewritePattern;
 
-  LogicalResult matchAndRewrite(vector::MultiDimReductionOp reductionOp,
+  MultiDimReductionOpToWarpReductionPattern(MLIRContext* context,
+                                            StringRef warpDistributionLabel)
+      : OpRewritePattern<MultiDimReductionOp>(context),
+        warpDistributionLabel(warpDistributionLabel) {}
+
+  LogicalResult matchAndRewrite(MultiDimReductionOp reductionOp,
                                 PatternRewriter& rewriter) const override;
+
+ private:
+  std::string warpDistributionLabel;
 };
 
 struct EliminateMaterializeOfTransferReadPattern
@@ -111,19 +127,29 @@ struct EliminateDistributeIntoTransferWritePattern
 /// Implements the GmlStToGpuPass declared in
 /// include/mlir-hlo/Dialect/gml_st/transforms/passes.td.
 struct GmlStToGpuPass : public ::impl::GmlStToGpuPassBase<GmlStToGpuPass> {
+  using GmlStToGpuPassBase<GmlStToGpuPass>::GmlStToGpuPassBase;
+
   void runOnOperation() override {
-    RewritePatternSet patterns(&getContext());
-    patterns
-        .add<ParallelOpToGpuPattern, EliminateMaterializeOfTransferReadPattern,
-             EliminateDistributeIntoTransferWritePattern,
-             GenericOpToWarpReductionPattern,
-             MultiDimReductionOpToWarpReductionPattern>(&getContext());
+    MLIRContext& ctx = getContext();
+    RewritePatternSet patterns(&ctx);
+
+    patterns.add<ParallelOpToGpuPattern>(&ctx, blockDistributionLabel);
+    patterns.add<EliminateMaterializeOfTransferReadPattern,
+                 EliminateDistributeIntoTransferWritePattern>(&ctx);
+    patterns.add<MultiDimReductionOpToWarpReductionPattern>(
+        &ctx, warpDistributionLabel);
+
     func::FuncOp func = getOperation();
     if (failed(applyPatternsAndFoldGreedily(func, std::move(patterns))))
       signalPassFailure();
-    // Make sure there are no ParallelOps left.
+    // Make sure there are no gml_st.parallel ops left.
+    // TODO(b/254497967): Properly handle a full conversion from GmlSt to GPU
+    // once SIMTfication is split from conversion of other GmlSt operations.
+    // For now, only verify that we do not have a ParallelOp, since there
+    // might still be other gml_st operations that will be removed by a
+    // subsequent conversion from GmlSt to SCF.
     WalkResult walk = func.walk([](ParallelOp op) {
-      op.emitOpError("failed to simtfy");
+      op->emitOpError("failed to simtfy");
       return WalkResult::interrupt();
     });
     if (walk.wasInterrupted()) signalPassFailure();
@@ -264,11 +290,15 @@ LogicalResult ParallelOpToGpuPattern::matchAndRewrite(
     ParallelOp root, PatternRewriter& rewriter) const {
   Location loc = root.getLoc();
 
-  if (root->getParentOfType<ParallelOp>())
-    return rewriter.notifyMatchFailure(root, "should be the root parallel");
+  if (!root.getDistributionType().has_value() ||
+      root.getDistributionType().value() != blockDistributionLabel)
+    return rewriter.notifyMatchFailure(root,
+                                       "expected block distribution label");
 
   Value defaultSize = rewriter.create<arith::ConstantIndexOp>(loc, 1);
   LaunchOp launch = createInitialGpuLaunchOp(loc, defaultSize, rewriter);
+
+  constexpr size_t kNumberOfNestedLoops = 3;
 
   BlockAndValueMapping bvm;
   // We need to keep track of which value in the gpu.launch region represents
@@ -276,16 +306,19 @@ LogicalResult ParallelOpToGpuPattern::matchAndRewrite(
   // we might have multiple gml_st.parallel operations on the same level, and
   // their induction variables should map to the same value in the flattened
   // gpu.launch region.
-  SmallVector<Value, 3> nestingLevelToInductionVarMap;
+  SmallVector<Value, kNumberOfNestedLoops> nestingLevelToInductionVarMap;
   // This is our stack holding in-flight operations of gml_st.parallel regions
   // that we started to copy over to the gpu.launch region, but are on hold
   // while we are processing a nested gml_st.parallel.
-  SmallVector<iterator_range<Block::iterator>, 3> loopIterators;
+  SmallVector<iterator_range<Block::iterator>, kNumberOfNestedLoops>
+      loopIterators;
 
   // This functor implements the processing of a single parallel op:
   // 1)  update of GPU launch bounds according to the interation space
   // 2)  addition of a nesting level to `loopIterators`, with the iterator
   //     over `parallel`'s body
+  // 3)  propagation of the distribution level of the op to all its
+  //     (non-ParallelOp) children if it is not at the innermost nesting level
   auto processParallelOp = [&](ParallelOp parallel) {
     unsigned nestingLevel = loopIterators.size();
     unsigned inductionVarIdx = 0;
@@ -313,10 +346,31 @@ LogicalResult ParallelOpToGpuPattern::matchAndRewrite(
           parallel, bvm, inductionVarIdx, launch, rewriter));
     }
 
+    Block* body = parallel.getBody();
+
+    // Check that the nesting level is not the innermost one (i.e. that we
+    // are not at the thread level, but either at the block, or at the warp
+    // level).
+    if (nestingLevel < kNumberOfNestedLoops - 1) {
+      if (!parallel.getDistributionType().has_value())
+        return rewriter.notifyMatchFailure(
+            parallel,
+            "expected parallel operation to define a distribution type");
+
+      const StringAttr distributionTypeAttr =
+          parallel.getDistributionTypeAttr();
+      body->walk<WalkOrder::PreOrder>(
+          [&distributionTypeAttr](Operation* nestedOp) {
+            if (dyn_cast<ParallelOp>(nestedOp)) return WalkResult::skip();
+            nestedOp->setAttr(kDistributionLabelKey, distributionTypeAttr);
+            return WalkResult::advance();
+          });
+    }
+
     bvm.map(parallel.getInductionVars().front(),
             nestingLevelToInductionVarMap[nestingLevel]);
-    Block* body = parallel.getBody();
     loopIterators.push_back(llvm::make_range(body->begin(), body->end()));
+
     return success();
   };
 
@@ -360,104 +414,33 @@ LogicalResult ParallelOpToGpuPattern::matchAndRewrite(
   return success();
 }
 
-LogicalResult GenericOpToWarpReductionPattern::matchAndRewrite(
-    linalg::GenericOp genericOp, PatternRewriter& rewriter) const {
-  // Match only if it's a linalg.generic vector<32xf32> -> memref<1xf32> with
-  // iterator_types = ["parallel", "reduction"].
-  auto itTypes = llvm::to_vector(
-      genericOp.getIteratorTypes().getAsValueRange<StringAttr>());
-  if (itTypes.size() != 2 || itTypes[0] != getParallelIteratorTypeName() ||
-      itTypes[1] != getReductionIteratorTypeName()) {
-    return rewriter.notifyMatchFailure(genericOp,
-                                       "Expected ['parallel', 'reduction']");
-  }
-  if (genericOp.getNumInputs() != 1 || genericOp.getNumOutputs() != 1) {
-    return rewriter.notifyMatchFailure(genericOp,
-                                       "Expected single input and output");
-  }
-  auto input = genericOp.getInputs().front();
-  auto output = genericOp.getOutputs().front();
-  auto inType = input.getType().dyn_cast<VectorType>();
-  auto outType = output.getType().dyn_cast<MemRefType>();
-  auto isNumElementsEqual = [](auto type, int64_t size) {
-    return type && type.hasStaticShape() && type.getNumElements() == size;
-  };
-  if (!isNumElementsEqual(inType, 32)) {
-    return rewriter.notifyMatchFailure(genericOp, "Expected 32-vector input");
-  }
-  if (!isNumElementsEqual(outType, 1)) {
-    return rewriter.notifyMatchFailure(genericOp, "Expected 1-element output");
-  }
-
-  // Split block before linalg.generic in order to clone its accumulate block.
-  Block* prologue = genericOp->getBlock();
-  Block* epilogue = rewriter.splitBlock(prologue, genericOp->getIterator());
-  rewriter.setInsertionPointToEnd(prologue);
-
-  // Preamble: extract lane id element from input.
-  Location loc = genericOp->getLoc();
-  Value laneId = rewriter.create<gpu::LaneIdOp>(loc);
-  Value cast = rewriter.create<vector::ShapeCastOp>(
-      loc, VectorType::get(inType.getNumElements(), inType.getElementType()),
-      input);
-  Value lhs = rewriter.create<vector::ExtractElementOp>(loc, cast, laneId);
-  auto getI32Attr = [&](int32_t value) {
-    return rewriter.getI32IntegerAttr(value);
-  };
-  Value width = rewriter.create<arith::ConstantOp>(loc, getI32Attr(32));
-
-  // Create warp shuffles of increasing offset and interleave with a clone of
-  // the accumulate block.
-  for (int i = 1; i < 32; i *= 2) {
-    Value offset = rewriter.create<arith::ConstantOp>(loc, getI32Attr(i));
-    auto shuffleOp = rewriter.create<gpu::ShuffleOp>(loc, lhs, offset, width,
-                                                     gpu::ShuffleMode::XOR);
-    // Clone accumulate block, then merge with prologue and erase terminator.
-    rewriter.cloneRegionBefore(genericOp.getRegion(), epilogue);
-    rewriter.mergeBlocks(prologue->getNextNode(), prologue,
-                         {lhs, shuffleOp.getShuffleResult()});
-    lhs = prologue->getTerminator()->getOperand(0);
-    rewriter.eraseOp(prologue->getTerminator());
-  }
-  // Store the result into output.
-  Value zero = rewriter.create<arith::ConstantIndexOp>(loc, 0);
-  rewriter.create<memref::StoreOp>(loc, lhs, output, zero);
-  rewriter.mergeBlocks(epilogue, prologue, llvm::None);
-
-  // Erase linalg.generic op.
-  rewriter.eraseOp(genericOp);
-
-  return success();
-}
-
 static Value createCombineOp(Location loc, Value lhs, Value rhs,
-                             vector::CombiningKind kind,
-                             PatternRewriter& rewriter) {
+                             CombiningKind kind, PatternRewriter& rewriter) {
   auto helper = [&](auto dummy) {
     return rewriter.create<decltype(dummy)>(loc, lhs, rhs);
   };
   switch (kind) {
-    case vector::CombiningKind::ADD:
+    case CombiningKind::ADD:
       return helper(arith::AddFOp());
-    case vector::CombiningKind::MUL:
+    case CombiningKind::MUL:
       return helper(arith::MulFOp());
-    case vector::CombiningKind::MINUI:
+    case CombiningKind::MINUI:
       return helper(arith::MinUIOp());
-    case vector::CombiningKind::MINSI:
+    case CombiningKind::MINSI:
       return helper(arith::MinSIOp());
-    case vector::CombiningKind::MINF:
+    case CombiningKind::MINF:
       return helper(arith::MinFOp());
-    case vector::CombiningKind::MAXUI:
+    case CombiningKind::MAXUI:
       return helper(arith::MaxUIOp());
-    case vector::CombiningKind::MAXSI:
+    case CombiningKind::MAXSI:
       return helper(arith::MaxSIOp());
-    case vector::CombiningKind::MAXF:
+    case CombiningKind::MAXF:
       return helper(arith::MaxFOp());
-    case vector::CombiningKind::AND:
+    case CombiningKind::AND:
       return helper(arith::AndIOp());
-    case vector::CombiningKind::OR:
+    case CombiningKind::OR:
       return helper(arith::OrIOp());
-    case vector::CombiningKind::XOR:
+    case CombiningKind::XOR:
       return helper(arith::XOrIOp());
     default:
       llvm_unreachable("unhandled");
@@ -465,67 +448,66 @@ static Value createCombineOp(Location loc, Value lhs, Value rhs,
 }
 
 LogicalResult MultiDimReductionOpToWarpReductionPattern::matchAndRewrite(
-    vector::MultiDimReductionOp reductionOp, PatternRewriter& rewriter) const {
+    MultiDimReductionOp reductionOp, PatternRewriter& rewriter) const {
+  auto distributionLevelAttr =
+      reductionOp->getAttrOfType<StringAttr>(kDistributionLabelKey);
+
+  if (!distributionLevelAttr ||
+      distributionLevelAttr.getValue() != warpDistributionLabel)
+    return rewriter.notifyMatchFailure(reductionOp,
+                                       "expected warp-level operation");
+
   auto inType = reductionOp.getSourceVectorType();
+  int64_t width = inType.getNumElements();
+  std::initializer_list<int64_t> supportedWidths = {1, 2, 4, 8, 16, 32};
+  if (!llvm::is_contained(supportedWidths, width)) {
+    return rewriter.notifyMatchFailure(
+        reductionOp, "expected input vector with size 2^N, <=32");
+  }
+  auto hasOneElement = [](auto type) {
+    return type && type.getNumElements() == 1;
+  };
   auto outType = reductionOp.getDestType().dyn_cast<VectorType>();
-  auto isNumElementsEqual = [](auto type, int64_t size) {
-    return type && type.getNumElements() == size;
-  };
-  if (!isNumElementsEqual(inType, 32)) {
-    return rewriter.notifyMatchFailure(reductionOp, "Expected 32-vector input");
+  if (!hasOneElement(outType)) {
+    return rewriter.notifyMatchFailure(reductionOp, "expected 1-vector output");
   }
-  if (!isNumElementsEqual(outType, 1)) {
-    return rewriter.notifyMatchFailure(reductionOp, "Expected 1-vector output");
+  auto distribute = reductionOp.getSource().getDefiningOp<DistributeOp>();
+  if (!distribute) {
+    return rewriter.notifyMatchFailure(
+        reductionOp, "source not defined by gml_st.distribute");
+  }
+  // Even if this value was not written into the tile corresponding to the
+  // current thread's lane id, this is fine, since it doesn't matter which
+  // thread processes which element within a reduction.
+  TypedValue<VectorType> lhsVector = distribute.getSource();
+  if (!hasOneElement(lhsVector.getType())) {
+    return rewriter.notifyMatchFailure(distribute, "expected 1-vector input");
   }
 
-  // Preamble: extract lane id element from input.
+  // Preamble: extract element from input
   Location loc = reductionOp->getLoc();
-  Value laneId = rewriter.create<gpu::LaneIdOp>(loc);
-  Value cast = rewriter.create<vector::ShapeCastOp>(
-      loc, VectorType::get(inType.getNumElements(), inType.getElementType()),
-      reductionOp.getSource());
-  Value lhs = rewriter.create<vector::ExtractElementOp>(loc, cast, laneId);
+  Value lhs = rewriter.create<ExtractOp>(
+      loc, lhsVector, SmallVector<int64_t>(lhsVector.getType().getRank(), 0));
 
-  auto getI32Attr = [&](int32_t value) {
-    return rewriter.getI32IntegerAttr(value);
+  auto createConstant = [&](int32_t value) {
+    return rewriter.create<arith::ConstantOp>(
+        loc, rewriter.getI32IntegerAttr(value));
   };
-  Value width = rewriter.create<arith::ConstantOp>(loc, getI32Attr(32));
-
+  Value cWidth = createConstant(width);
   // Create warp shuffles of increasing offset and interleave with a clone of
   // the accumulate block.
-  for (int i = 1; i < 32; i *= 2) {
-    Value offset = rewriter.create<arith::ConstantOp>(loc, getI32Attr(i));
-    auto shuffleOp = rewriter.create<gpu::ShuffleOp>(loc, lhs, offset, width,
-                                                     gpu::ShuffleMode::XOR);
+  for (int64_t i = 1; i < width; i *= 2) {
+    auto shuffleOp = rewriter.create<gpu::ShuffleOp>(
+        loc, lhs, createConstant(i), cWidth, gpu::ShuffleMode::XOR);
     lhs = createCombineOp(loc, lhs, shuffleOp.getShuffleResult(),
                           reductionOp.getKind(), rewriter);
   }
 
   // Combine with init element and broadcast result back to vector.
-  Value acc = rewriter.create<vector::ExtractOp>(loc, reductionOp.getAcc(), 0);
+  Value acc = rewriter.create<ExtractOp>(loc, reductionOp.getAcc(), 0);
   lhs = createCombineOp(loc, lhs, acc, reductionOp.getKind(), rewriter);
   rewriter.replaceOpWithNewOp<vector::BroadcastOp>(reductionOp, outType, lhs);
 
-  return success();
-}
-
-template <typename TransferOp>
-static LogicalResult matchCannonicalTransferOp(TransferOp op,
-                                               PatternRewriter& rewriter) {
-  auto isZeroIndex = [](Value value) {
-    auto constIndex = value.getDefiningOp<arith::ConstantIndexOp>();
-    return constIndex && constIndex.value() == 0;
-  };
-  if (!llvm::all_of(op.getIndices(), isZeroIndex)) {
-    return rewriter.notifyMatchFailure(op, "should have all indices set to 0");
-  }
-  if (!op.getPermutationMap().isMinorIdentity()) {
-    return rewriter.notifyMatchFailure(op,
-                                       "expected cannonical permutation map");
-  }
-  if (op.getMask()) {
-    return rewriter.notifyMatchFailure(op, "should have no mask");
-  }
   return success();
 }
 
@@ -561,8 +543,7 @@ LogicalResult EliminateMaterializeOfTransferReadPattern::matchAndRewrite(
     return rewriter.notifyMatchFailure(transferRead,
                                        "expected memref as source");
   }
-  if (failed(matchCannonicalTransferOp(transferRead, rewriter)))
-    return failure();
+  if (failed(matchSimpleTransferOp(transferRead, rewriter))) return failure();
 
   auto tile = materialize.getSet().getDefiningOp<TileOp>();
   if (!tile) {
@@ -579,10 +560,16 @@ LogicalResult EliminateMaterializeOfTransferReadPattern::matchAndRewrite(
   // for elementwise fusion and softmax, but might become a problem down the
   // line.
   auto subview = createSubView(materialize.getLoc(), source, tile, rewriter);
+  Type resultType = materialize.getResult().getType();
+  if (!resultType.isa<VectorType>()) {
+    // We have a transfer to a single element: just use memref.load directly.
+    rewriter.replaceOpWithNewOp<memref::LoadOp>(materialize, subview,
+                                                transferRead.getIndices());
+    return success();
+  }
   rewriter.replaceOpWithNewOp<TransferReadOp>(
-      materialize, materialize.getResult().getType().cast<VectorType>(),
-      subview, transferRead.getIndices(), transferRead.getPermutationMap(),
-      transferRead.getPadding(),
+      materialize, resultType, subview, transferRead.getIndices(),
+      transferRead.getPermutationMap(), transferRead.getPadding(),
       /*mask=*/nullptr, transferRead.getInBounds().value_or(nullptr));
   return success();
 }
@@ -599,8 +586,7 @@ LogicalResult EliminateDistributeIntoTransferWritePattern::matchAndRewrite(
     return rewriter.notifyMatchFailure(transferWrite,
                                        "expected memref as destination");
   }
-  if (failed(matchCannonicalTransferOp(transferWrite, rewriter)))
-    return failure();
+  if (failed(matchSimpleTransferOp(transferWrite, rewriter))) return failure();
 
   auto distribute = transferWrite.getVector().getDefiningOp<DistributeOp>();
   if (!distribute) {
@@ -626,4 +612,12 @@ LogicalResult EliminateDistributeIntoTransferWritePattern::matchAndRewrite(
       transferWrite.getIndices(), transferWrite.getPermutationMap(),
       /*mask=*/nullptr, transferWrite.getInBounds().value_or(nullptr));
   return success();
+}
+
+std::unique_ptr<OperationPass<func::FuncOp>> mlir::gml_st::createGmlStToGpuPass(
+    StringRef blockDistributionLabel, StringRef warpDistributionLabel) {
+  const GmlStToGpuPassOptions passOptions = {
+      /*.blockDistributionLabel=*/std::string(blockDistributionLabel),
+      /*.warpDistributionLabel=*/std::string(warpDistributionLabel)};
+  return std::make_unique<GmlStToGpuPass>(passOptions);
 }
